@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""
+Medion Keyboard RGB Profile Manager
+Manage per-key RGB profiles for Medion keyboards
+"""
+
+import os
+import sys
+import json
+import argparse
+from pathlib import Path
+from typing import Dict, Tuple
+
+# Configuration
+LED_BASE_PATH = "/sys/class/leds"
+PROFILE_DIR = Path.home() / ".config" / "medion-rgb-profiles"
+NUM_KEYS = 126
+
+class MedionRGB:
+    def __init__(self):
+        self.profile_dir = PROFILE_DIR
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_led_path(self, key_num) -> Path:
+        """Get the sysfs path for a specific key LED"""
+        if key_num == "base":
+            # Special unnumbered LED (often left Ctrl key)
+            return Path(LED_BASE_PATH) / "rgb:kbd_backlight"
+        return Path(LED_BASE_PATH) / f"rgb:kbd_backlight_{key_num}"
+
+    def read_key_color(self, key_num: int) -> Tuple[int, int, int]:
+        """Read RGB values for a specific key"""
+        led_path = self.get_led_path(key_num)
+        try:
+            multi_intensity = (led_path / "multi_intensity").read_text().strip()
+            r, g, b = map(int, multi_intensity.split())
+            return (r, g, b)
+        except (FileNotFoundError, ValueError, PermissionError) as e:
+            print(f"Warning: Could not read key {key_num}: {e}", file=sys.stderr)
+            return (0, 0, 0)
+
+    def set_key_color(self, key_num: int, r: int, g: int, b: int):
+        """Set RGB values for a specific key"""
+        led_path = self.get_led_path(key_num)
+        try:
+            multi_intensity_path = led_path / "multi_intensity"
+            # Need sudo/root for writing
+            os.system(f'echo "{r} {g} {b}" | sudo tee {multi_intensity_path} > /dev/null')
+        except Exception as e:
+            print(f"Error setting key {key_num}: {e}", file=sys.stderr)
+
+    def read_brightness(self, key_num: int) -> int:
+        """Read brightness for a specific key"""
+        led_path = self.get_led_path(key_num)
+        try:
+            brightness = (led_path / "brightness").read_text().strip()
+            return int(brightness)
+        except (FileNotFoundError, ValueError, PermissionError):
+            return 50  # default max brightness
+
+    def set_brightness(self, key_num: int, brightness: int):
+        """Set brightness for a specific key (0-50)"""
+        led_path = self.get_led_path(key_num)
+        try:
+            brightness = max(0, min(50, brightness))  # clamp to 0-50
+            brightness_path = led_path / "brightness"
+            os.system(f'echo "{brightness}" | sudo tee {brightness_path} > /dev/null')
+        except Exception as e:
+            print(f"Error setting brightness for key {key_num}: {e}", file=sys.stderr)
+
+    def save_profile(self, profile_name: str):
+        """Save current keyboard RGB configuration to a profile"""
+        print(f"Reading current keyboard configuration...")
+
+        profile_data = {
+            "version": 1,
+            "keys": {}
+        }
+
+        # Save the special unnumbered LED first
+        if self.get_led_path("base").exists():
+            color = self.read_key_color("base")
+            brightness = self.read_brightness("base")
+            profile_data["keys"]["base"] = {
+                "rgb": color,
+                "brightness": brightness
+            }
+
+        for key_num in range(NUM_KEYS):
+            if not self.get_led_path(key_num).exists():
+                continue
+
+            color = self.read_key_color(key_num)
+            brightness = self.read_brightness(key_num)
+            profile_data["keys"][str(key_num)] = {
+                "rgb": color,
+                "brightness": brightness
+            }
+
+            # Progress indicator
+            if (key_num + 1) % 20 == 0:
+                print(f"  Read {key_num + 1}/{NUM_KEYS} keys...")
+
+        # Save to file
+        profile_path = self.profile_dir / f"{profile_name}.json"
+        with open(profile_path, 'w') as f:
+            json.dump(profile_data, f, indent=2)
+
+        print(f"✓ Profile saved: {profile_path}")
+        print(f"  {len(profile_data['keys'])} keys saved")
+
+    def load_profile(self, profile_name: str):
+        """Load and apply an RGB profile"""
+        profile_path = self.profile_dir / f"{profile_name}.json"
+
+        if not profile_path.exists():
+            print(f"Error: Profile '{profile_name}' not found", file=sys.stderr)
+            print(f"Available profiles: {self.list_profiles()}")
+            return False
+
+        print(f"Loading profile: {profile_name}")
+
+        with open(profile_path, 'r') as f:
+            profile_data = json.load(f)
+
+        keys = profile_data.get("keys", {})
+        total = len(keys)
+
+        for i, (key_num_str, data) in enumerate(keys.items()):
+            # Handle both numeric keys and the special "base" key
+            key_num = key_num_str if key_num_str == "base" else int(key_num_str)
+            rgb = data.get("rgb", [0, 0, 0])
+            brightness = data.get("brightness", 50)
+
+            self.set_key_color(key_num, rgb[0], rgb[1], rgb[2])
+            self.set_brightness(key_num, brightness)
+
+            # Progress indicator
+            if (i + 1) % 20 == 0 or i == total - 1:
+                print(f"  Applied {i + 1}/{total} keys...")
+
+        print(f"✓ Profile '{profile_name}' applied successfully")
+        return True
+
+    def list_profiles(self):
+        """List all available profiles"""
+        profiles = sorted([p.stem for p in self.profile_dir.glob("*.json")])
+        return profiles
+
+    def delete_profile(self, profile_name: str):
+        """Delete a profile"""
+        profile_path = self.profile_dir / f"{profile_name}.json"
+        if profile_path.exists():
+            profile_path.unlink()
+            print(f"✓ Profile '{profile_name}' deleted")
+            return True
+        else:
+            print(f"Error: Profile '{profile_name}' not found", file=sys.stderr)
+            return False
+
+    def create_preset(self, preset_name: str):
+        """Create a preset profile with predefined colors"""
+        print(f"Creating preset: {preset_name}")
+
+        presets = {
+            "rainbow": self._rainbow_preset,
+            "red": lambda k: (255, 0, 0),
+            "green": lambda k: (0, 255, 0),
+            "blue": lambda k: (0, 0, 255),
+            "purple": lambda k: (128, 0, 128),
+            "cyan": lambda k: (0, 255, 255),
+            "yellow": lambda k: (255, 255, 0),
+            "white": lambda k: (255, 255, 255),
+            "off": lambda k: (0, 0, 0),
+        }
+
+        if preset_name not in presets:
+            print(f"Error: Unknown preset '{preset_name}'", file=sys.stderr)
+            print(f"Available presets: {', '.join(presets.keys())}")
+            return False
+
+        color_func = presets[preset_name]
+
+        # Set the special unnumbered LED first
+        if self.get_led_path("base").exists():
+            r, g, b = color_func(0)  # Use key 0 color for base
+            self.set_key_color("base", r, g, b)
+            self.set_brightness("base", 50)
+
+        for key_num in range(NUM_KEYS):
+            if not self.get_led_path(key_num).exists():
+                continue
+
+            r, g, b = color_func(key_num)
+            self.set_key_color(key_num, r, g, b)
+            self.set_brightness(key_num, 50)
+
+            if (key_num + 1) % 20 == 0:
+                print(f"  Applied {key_num + 1}/{NUM_KEYS} keys...")
+
+        print(f"✓ Preset '{preset_name}' applied")
+        return True
+
+    def _rainbow_preset(self, key_num: int) -> Tuple[int, int, int]:
+        """Generate rainbow colors based on key position"""
+        import colorsys
+        hue = (key_num / NUM_KEYS) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Medion Keyboard RGB Profile Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Save current keyboard colors as a profile
+  %(prog)s save my-profile
+
+  # Load a saved profile
+  %(prog)s load my-profile
+
+  # List all saved profiles
+  %(prog)s list
+
+  # Apply a preset color scheme
+  %(prog)s preset rainbow
+
+  # Delete a profile
+  %(prog)s delete my-profile
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+    # Save command
+    save_parser = subparsers.add_parser('save', help='Save current keyboard configuration')
+    save_parser.add_argument('profile_name', help='Name for the profile')
+
+    # Load command
+    load_parser = subparsers.add_parser('load', help='Load a saved profile')
+    load_parser.add_argument('profile_name', help='Name of the profile to load')
+
+    # List command
+    subparsers.add_parser('list', help='List all saved profiles')
+
+    # Delete command
+    delete_parser = subparsers.add_parser('delete', help='Delete a profile')
+    delete_parser.add_argument('profile_name', help='Name of the profile to delete')
+
+    # Preset command
+    preset_parser = subparsers.add_parser('preset', help='Apply a preset color scheme')
+    preset_parser.add_argument('preset_name',
+                               help='Preset name (rainbow, red, green, blue, purple, cyan, yellow, white, off)')
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    rgb = MedionRGB()
+
+    if args.command == 'save':
+        rgb.save_profile(args.profile_name)
+
+    elif args.command == 'load':
+        rgb.load_profile(args.profile_name)
+
+    elif args.command == 'list':
+        profiles = rgb.list_profiles()
+        if profiles:
+            print("Available profiles:")
+            for profile in profiles:
+                profile_path = rgb.profile_dir / f"{profile}.json"
+                size = profile_path.stat().st_size
+                print(f"  • {profile} ({size} bytes)")
+        else:
+            print("No profiles found.")
+            print(f"Profiles are stored in: {rgb.profile_dir}")
+
+    elif args.command == 'delete':
+        rgb.delete_profile(args.profile_name)
+
+    elif args.command == 'preset':
+        rgb.create_preset(args.preset_name)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
