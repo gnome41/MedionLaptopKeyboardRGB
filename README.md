@@ -8,6 +8,44 @@ Per-key RGB keyboard lighting tools for Medion laptops (e.g. Erazer Major X20) o
 - Python 3
 - sudo access (required for LED writes)
 
+## Installing Dependencies
+
+### Python 3
+
+Python 3 is included by default on most Linux distributions. To check:
+
+```bash
+python3 --version
+```
+
+If it's not installed:
+
+```bash
+# Arch / Manjaro
+sudo pacman -S python
+
+# Ubuntu / Debian / Linux Mint
+sudo apt install python3
+
+# Fedora
+sudo dnf install python3
+
+# openSUSE
+sudo zypper install python3
+```
+
+No additional Python packages are required — all tools use the standard library only.
+
+### Verifying sysfs LED support
+
+Check that your laptop exposes the LED interface:
+
+```bash
+ls /sys/class/leds/ | grep kbd_backlight
+```
+
+You should see `rgb:kbd_backlight` plus entries like `rgb:kbd_backlight_0`, `rgb:kbd_backlight_1`, etc. If nothing appears, your kernel or laptop model may not support this interface.
+
 ## Installation
 
 ### Option 1: Download a release (recommended)
